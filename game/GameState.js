@@ -392,6 +392,7 @@ export class GameState {
       players: playersData,
       myHand: this.players.get(playerId)?.hand || [],
       drawPileCount: this.drawPile.length,
+      explodingKittenCount: this.drawPile.filter((c) => c.type === CARD_TYPES.EXPLODING_KITTEN).length,
       discardPile: this.discardPile.slice(-1), // only top card
       discardPileCount: this.discardPile.length,
       currentPlayerId: this.turnManager?.currentPlayerId || null,
