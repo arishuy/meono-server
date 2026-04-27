@@ -26,6 +26,94 @@ const io = new Server(httpServer, {
 });
 
 const gameManager = new GameManager();
+const roomTimers = new Map();
+
+function resetTurnTimer(roomCode) {
+  if (roomTimers.has(roomCode)) {
+    clearTimeout(roomTimers.get(roomCode));
+  }
+  const room = gameManager.getRoom(roomCode);
+  if (!room || !room.state || room.state.phase !== 'playing') {
+    roomTimers.delete(roomCode);
+    return;
+  }
+
+  const timeoutSeconds = parseInt(process.env.TURN_TIMEOUT_SECONDS || '30', 10);
+  room.state.turnEndTime = Date.now() + timeoutSeconds * 1000;
+
+  const timeout = setTimeout(() => {
+    handleTurnTimeout(roomCode);
+  }, timeoutSeconds * 1000);
+
+  roomTimers.set(roomCode, timeout);
+}
+
+function handleTurnTimeout(roomCode) {
+  const room = gameManager.getRoom(roomCode);
+  if (!room || !room.state || room.state.phase !== 'playing') return;
+
+  const state = room.state;
+  try {
+    if (state.pendingAction) {
+      if (state.pendingAction.type === 'defuse_insert') {
+        const playerId = state.pendingAction.playerId;
+        state.handleDefuse(playerId, 0);
+        io.to(roomCode).emit('player-defused', {
+          playerId: playerId,
+          playerName: state.players.get(playerId)?.name,
+        });
+      } else if (state.pendingAction.type === 'favor_give') {
+        const target = state.players.get(state.pendingAction.targetId);
+        if (target && target.hand.length > 0) {
+          const randomCard = target.hand[Math.floor(Math.random() * target.hand.length)];
+          state.handleFavorGive(state.pendingAction.targetId, randomCard.id);
+        } else {
+          state.pendingAction = null;
+        }
+      } else if (state.pendingAction.type === 'steal_choose') {
+        const alive = state.getAlivePlayerIds().filter(id => id !== state.pendingAction.playerId && state.players.get(id).hand.length > 0);
+        if (alive.length > 0) {
+          const targetId = alive[Math.floor(Math.random() * alive.length)];
+          const result = state.handleSteal(state.pendingAction.playerId, targetId);
+          io.to(state.pendingAction.playerId).emit('steal-result', { card: result.stolenCard });
+        } else {
+          state.pendingAction = null;
+        }
+      }
+    } else {
+      const playerId = state.turnManager.currentPlayerId;
+      const result = state.drawFromPile(playerId);
+
+      if (result.type === 'exploding_kitten') {
+        if (result.hasDefuse) {
+          io.to(playerId).emit('must-defuse', { deckSize: result.deckSize });
+          io.to(roomCode).except(playerId).emit('player-drew-ek', {
+            playerId: playerId,
+            hasDefuse: true,
+          });
+        } else {
+          io.to(roomCode).emit('player-eliminated', {
+            playerId: playerId,
+            playerName: state.players.get(playerId)?.name,
+          });
+          if (result.winner) {
+            io.to(roomCode).emit('game-over', {
+              winnerId: result.winner,
+              winnerName: state.players.get(result.winner)?.name,
+            });
+          }
+        }
+      } else {
+        io.to(playerId).emit('card-drawn', { card: result.card });
+      }
+    }
+
+    resetTurnTimer(roomCode);
+    broadcastState(roomCode, room);
+  } catch (err) {
+    console.error("Auto timeout error", err);
+  }
+}
 
 // Health check
 app.get('/', (req, res) => {
@@ -69,6 +157,7 @@ io.on('connection', (socket) => {
 
       // Send personalized state to each player
       const room = gameManager.getRoom(roomCode);
+      resetTurnTimer(roomCode);
       for (const [sid] of room.players) {
         io.to(sid).emit('game-started', state.serializeForPlayer(sid));
       }
@@ -93,6 +182,7 @@ io.on('connection', (socket) => {
       }
 
       // Broadcast updated state to all players
+      resetTurnTimer(roomCode);
       broadcastState(roomCode, room);
 
       callback({ success: true, result: { type: result.type } });
@@ -138,6 +228,7 @@ io.on('connection', (socket) => {
         io.to(socket.id).emit('card-drawn', { card: result.card });
       }
 
+      resetTurnTimer(roomCode);
       broadcastState(roomCode, room);
       callback({ success: true, type: result.type });
     } catch (err) {
@@ -156,6 +247,7 @@ io.on('connection', (socket) => {
         playerName: room.state.players.get(socket.id)?.name,
       });
 
+      resetTurnTimer(roomCode);
       broadcastState(roomCode, room);
       callback({ success: true });
     } catch (err) {
@@ -169,6 +261,7 @@ io.on('connection', (socket) => {
       if (!room?.state) throw new Error('No active game');
 
       room.state.handleFavorGive(socket.id, cardId);
+      resetTurnTimer(roomCode);
       broadcastState(roomCode, room);
       callback({ success: true });
     } catch (err) {
@@ -185,6 +278,7 @@ io.on('connection', (socket) => {
       // Send stolen card info privately to the stealer
       io.to(socket.id).emit('steal-result', { card: result.stolenCard });
 
+      resetTurnTimer(roomCode);
       broadcastState(roomCode, room);
       callback({ success: true });
     } catch (err) {
@@ -205,6 +299,11 @@ io.on('connection', (socket) => {
       const room = gameManager.getRoom(result.roomCode);
       if (room?.state?.phase === 'playing') {
         broadcastState(result.roomCode, room);
+      }
+    } else if (result && result.roomDeleted) {
+      if (roomTimers.has(result.roomCode)) {
+        clearTimeout(roomTimers.get(result.roomCode));
+        roomTimers.delete(result.roomCode);
       }
     }
   });

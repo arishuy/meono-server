@@ -25,6 +25,7 @@ export class GameState {
     this.pendingAction = null; // { type, playerId, data }
     this.activityLog = [];
     this.hostId = null;
+    this.turnEndTime = null;
 
     for (const p of players) {
       this.players.set(p.id, {
@@ -397,6 +398,7 @@ export class GameState {
       discardPileCount: this.discardPile.length,
       currentPlayerId: this.turnManager?.currentPlayerId || null,
       turnsRemaining: this.turnManager?.turnsRemaining || 0,
+      turnEndsIn: this.turnEndTime ? Math.max(0, this.turnEndTime - Date.now()) : 0,
       isMyTurn: this.turnManager?.currentPlayerId === playerId,
       pendingAction: this.pendingAction,
       winner: this.winner,
